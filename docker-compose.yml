@@ -49,11 +49,33 @@ services:
       'aidial.redis.singleServerConfig.address': 'redis://redis:6379'
     depends_on:
       - redis
+    extra_hosts:
+      - "host.docker.internal:192.168.127.254"
     volumes:
       - ./settings:/opt/settings
       - ${DIAL_DIR:-.}/core:/opt/config
-      - ${DIAL_DIR:-.}/core-logs/:/app/log
-      - ${DIAL_DIR:-.}/core-data/:/app/data
+      - core-logs:/app/log
+      - core-data:/app/data
+  ddg-search:
+    image: khshanovskyi/ddg-mcp-server:latest
+    ports:
+      - "8051:8000"
+    environment:
+      LOG_LEVEL: "INFO"
+      MCP_TRANSPORT: "streamable-http"
+    restart: unless-stopped
+    mem_limit: 512M
+    cpus: 0.5
+
+  python-interpreter:
+    image: khshanovskyi/python-code-interpreter-mcp-server:latest
+    ports:
+      - "8050:8000"
+    environment:
+      LOG_LEVEL: "INFO"
+    restart: unless-stopped
+    mem_limit: 2G
+    cpus: 2.0
 
   adapter-dial:
     image: epam/ai-dial-adapter-dial:development
@@ -62,3 +84,6 @@ services:
       LOG_LEVEL: "INFO"
 
 
+volumes:  
+  core-logs:
+  core-data:  

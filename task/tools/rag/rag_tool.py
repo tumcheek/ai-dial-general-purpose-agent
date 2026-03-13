@@ -15,6 +15,7 @@ from task.utils.dial_file_conent_extractor import DialFileContentExtractor
 
 # TODO: provide system prompt for Generation step
 _SYSTEM_PROMPT = """
+You are an assistant for question-answering based on retrieved document chunks. Use the following retrieved document chunks to answer the question. Always rely on the retrieved chunks and do not use any other information. If the retrieved chunks do not contain the answer, say that you don't know. Always use all available retrieved chunks to find the answer. Be concise and precise in your answer.
 """
 
 
@@ -39,30 +40,52 @@ class RagTool(BaseTool):
         #   - chunk_overlap=50
         #   - length_function=len
         #   - separators=["\n\n", "\n", ". ", " ", ""]
-        raise NotImplementedError()
+        self.endpoint = endpoint
+        self.deployment_name = deployment_name
+        self.document_cache = document_cache
+        self.model = SentenceTransformer(model_name_or_path='all-MiniLM-L6-v2', device='cpu')
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=500,
+            chunk_overlap=50,
+            length_function=len,
+            separators=["\n\n", "\n", ". ", " ", ""]
+        )
 
     @property
     def show_in_stage(self) -> bool:
         # TODO: set as False since we will have custom variant of representation in Stage
-        raise NotImplementedError()
+        return False
 
     @property
     def name(self) -> str:
         # TODO: provide self-descriptive name
-        raise NotImplementedError()
+        return "rag_tool"
 
     @property
     def description(self) -> str:
         # TODO: provide tool description that will help LLM to understand when to use this tools and cover 'tricky'
         #  moments (not more 1024 chars)
-        raise NotImplementedError()
+        return "Performs semantic search on documents to find and answer questions based on relevant content. Supports: PDF, TXT, CSV, HTML."
 
     @property
     def parameters(self) -> dict[str, Any]:
         # TODO: provide tool parameters JSON Schema:
         #  - request is string, description: "The search query or question to search for in the document", required
         #  - file_url is string, required
-        raise NotImplementedError()
+       return {
+            "type": "object",
+            "properties": {
+                "request": {
+                    "type": "string",
+                    "description": "The search query or question to search for in the document.",
+                },
+                "file_url": {
+                    "type": "string",
+                    "description": "The URL of the file to extract content from. Supported formats: PDF (text only), TXT, CSV, HTML/HTM.",
+                }
+            },
+            "required": ["request", "file_url"]
+        }
 
 
     async def _execute(self, tool_call_params: ToolCallParams) -> str | Message:
@@ -98,8 +121,55 @@ class RagTool(BaseTool):
         #   - stream response to stage (user in real time will be able to see what the LLM responding while Generation step)
         #   - collect all content (we need to return it as tool execution result)
         # 19. return collected content
-        raise NotImplementedError()
+        args = json.loads(tool_call_params.tool_call.function.arguments)
+        request = args.get("request")
+        file_url = args.get("file_url")
+        stage = tool_call_params.stage
+        stage.append_content("## Request arguments: \n")
+        stage.append_content(f"**Request**: {request}\n\r")
+        stage.append_content(f"**File URL**: {file_url}\n\r")
+        conversation_id = tool_call_params.conversation_id
+        cache_document_key = f"{conversation_id}_{file_url}"
+        cached_data = self.document_cache.get(cache_document_key)
+        if cached_data:
+            index, chunks = cached_data
+        else:
+            text_content = DialFileContentExtractor(endpoint=self.endpoint, api_key=tool_call_params.api_key).extract_text(file_url=file_url)
+            if not text_content:
+                stage.append_content("Error: File content not found.")
+                return "Error: File content not found."
+            chunks = self.text_splitter.split_text(text_content)
+            embeddings = self.model.encode(chunks, convert_to_numpy=True).astype('float32')
+            index = faiss.IndexFlatL2(384)
+            index.add(embeddings)
+            self.document_cache.set(cache_document_key, (index, chunks))
+        query_embedding = self.model.encode([request], convert_to_numpy=True).astype('float32')
+        distances, indices = index.search(query_embedding, k=3)
+        retrieved_chunks = [chunks[idx] for idx in indices[0]]
+        augmented_prompt = self.__augmentation(request=request, chunks=retrieved_chunks)
+        stage.append_content("## RAG Request: \n")
+        stage.append_content(f"```text\n\r{augmented_prompt}\n\r```\n\r")
+        stage.append_content("## Response: \n")
+        dial_client = AsyncDial(base_url=self.endpoint, api_version='025-01-01-preview')
+        collected_content = ""
+        async for response in dial_client.chat_completions.create(
+            deployment_name=self.deployment_name,
+            system_prompt=_SYSTEM_PROMPT,
+            messages=[Message(role=Role.USER, content=augmented_prompt)],
+            stream=True
+        ):
+            if response.choices and len(response.choices) > 0:
+                delta = response.choices[0].delta
+                if delta and delta.content:
+                    stage.append_content(delta.content)
+                    collected_content += delta.content
+        return collected_content
+
 
     def __augmentation(self, request: str, chunks: list[str]) -> str:
         #TODO: make prompt augmentation
-        raise NotImplementedError()
+        augmented_prompt = f"Use the following retrieved document chunks to answer the question.\n\n"
+        for i, chunk in enumerate(chunks):
+            augmented_prompt += f"Chunk {i + 1}:\n{chunk}\n\n"
+        augmented_prompt += f"Question: {request}\n"
+        return augmented_prompt

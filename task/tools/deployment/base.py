@@ -42,4 +42,41 @@ class DeploymentTool(BaseTool, ABC):
         # 6. Collect content and it to stage, also, collect custom_content -> attachments and if they are present add
         #    them to stage as attachment as well
         # 7. Return Message with tool role, content, custom_content and tool_call_id
-        raise NotImplementedError()
+        args = json.loads(tool_call_params.tool_call.function.arguments)
+        prompt = args.pop("prompt", "")
+        async_dial = AsyncDial(api_key=tool_call_params.api_key, api_version="2025-01-01-preview", base_url=self.endpoint)
+        content = ""
+        custom_content = CustomContent(attachments=[])
+        async for response in await async_dial.chat.completions.create(
+            deployment_name=self.deployment_name,
+            messages=[{"role": "user", "content": prompt}],
+            stream=True,
+            extra_body={"custom_fields": args},
+            **self.tool_parameters
+        ):
+            if response.choices and len(response.choices) > 0:
+                delta = response.choices[0].delta
+                if delta:
+                    if delta.content:
+                        tool_call_params.stage.append_content(delta.content)
+                        content += delta.content
+                    if delta.custom_content and delta.custom_content.attachments:
+                        attachments = delta.custom_content.attachments
+                        custom_content.attachments.extend(attachments)
+
+                        for attachment in attachments:
+                            tool_call_params.stage.add_attachment(
+                                type=attachment.type,
+                                title=attachment.title,
+                                data=attachment.data,
+                                url=attachment.url,
+                                reference_url=attachment.reference_url,
+                                reference_type=attachment.reference_type,
+                            )
+
+        return Message(
+                role=Role.TOOL,
+                content=StrictStr(content),
+                custom_content=custom_content,
+                tool_call_id=StrictStr(tool_call_params.tool_call.id),
+            )

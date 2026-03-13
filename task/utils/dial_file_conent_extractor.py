@@ -12,7 +12,7 @@ class DialFileContentExtractor:
     def __init__(self, endpoint: str, api_key: str):
         #TODO:
         # Set Dial client with endpoint as base_url and api_key
-        raise NotImplementedError()
+        self.dial_client = Dial(base_url=endpoint, api_key=api_key)
 
     def extract_text(self, file_url: str) -> str:
         #TODO:
@@ -20,7 +20,11 @@ class DialFileContentExtractor:
         # 2. Get downloaded file name and content
         # 3. Get file extension, use for this `Path(filename).suffix.lower()`
         # 4. Call `__extract_text` and return its result
-        raise NotImplementedError()
+        file = self.dial_client.files.download(file_url)
+        filename = file.filename
+        file_content = file.get_content()
+        file_extension = Path(filename).suffix.lower()
+        return self.__extract_text(file_content=file_content, file_extension=file_extension, filename=filename)
 
     def __extract_text(self, file_content: bytes, file_extension: str, filename: str) -> str:
         """Extract text content based on file type."""
@@ -46,4 +50,26 @@ class DialFileContentExtractor:
         #   5. otherwise return it as decoded `file_content` with encoding 'utf-8' and errors='ignore'
         # except:
         #   print an error and return empty string
-        raise NotImplementedError()
+        try:
+            if file_extension == '.txt':
+                return file_content.decode('utf-8', errors='ignore')
+            elif file_extension == '.pdf':
+                with pdfplumber.open(io.BytesIO(file_content)) as pdf:
+                    pages_text = [page.extract_text() for page in pdf.pages]
+                return "\n".join(pages_text)
+            elif file_extension == '.csv':
+                decoded_text_content = file_content.decode('utf-8', errors='ignore')
+                csv_buffer = io.StringIO(decoded_text_content)
+                df = pd.read_csv(csv_buffer)
+                return df.to_markdown(index=False)
+            elif file_extension in ['.html', '.htm']:
+                decoded_html_content = file_content.decode('utf-8', errors='ignore')
+                soup = BeautifulSoup(decoded_html_content, features='html.parser')
+                for script in soup(["script", "style"]):
+                    script.decompose()
+                return soup.get_text(separator='\n', strip=True)
+            else:
+                return file_content.decode('utf-8', errors='ignore')
+        except Exception as e:
+            print(f"Error extracting text from file {filename}: {e}")
+            return ""   

@@ -16,8 +16,8 @@ from task.tools.rag.document_cache import DocumentCache
 from task.tools.rag.rag_tool import RagTool
 
 DIAL_ENDPOINT = os.getenv('DIAL_ENDPOINT', "http://localhost:8080")
-DEPLOYMENT_NAME = os.getenv('DEPLOYMENT_NAME', 'gpt-4o')
-# DEPLOYMENT_NAME = os.getenv('DEPLOYMENT_NAME', 'claude-haiku-4-5')
+# DEPLOYMENT_NAME = os.getenv('DEPLOYMENT_NAME', 'gpt-4o')
+DEPLOYMENT_NAME = os.getenv('DEPLOYMENT_NAME', 'claude-haiku-4-5')
 
 
 class GeneralPurposeAgentApplication(ChatCompletion):
@@ -32,7 +32,12 @@ class GeneralPurposeAgentApplication(ChatCompletion):
         # 3. Get tools, iterate through them and add them to created list as MCPTool where the client will be created
         #    MCPClient and mcp_tool_model will be the tool itself (see what `mcp_client.get_tools` returns).
         # 4. Return created tool list
-        raise NotImplementedError()
+        base_tools: list[BaseTool] = []
+        mcp_client = await MCPClient.create(mcp_server_url=url)
+        mcp_tools = await mcp_client.get_tools()
+        for mcp_tool_model in mcp_tools:
+            base_tools.append(MCPTool(client=mcp_client, mcp_tool_model=mcp_tool_model))
+        return base_tools
 
     async def _create_tools(self) -> list[BaseTool]:
         #TODO:
@@ -46,7 +51,13 @@ class GeneralPurposeAgentApplication(ChatCompletion):
         # 5. Add PythonCodeInterpreterTool with DIAL_ENDPOINT, `http://localhost:8050/mcp` mcp_url, tool_name is
         #    `execute_code`, more detailed about tools see in repository https://github.com/khshanovskyi/mcp-python-code-interpreter
         # 6. Extend tools with MCP tools from `http://localhost:8051/mcp` (use method `_get_mcp_tools`)
-        return []
+        base_tools: list[BaseTool] = []
+        base_tools.append(ImageGenerationTool(endpoint=DIAL_ENDPOINT))
+        base_tools.append(FileContentExtractionTool(endpoint=DIAL_ENDPOINT))
+        base_tools.append(RagTool(endpoint=DIAL_ENDPOINT, deployment_name=DEPLOYMENT_NAME, document_cache=DocumentCache.create()))
+        base_tools.append(await PythonCodeInterpreterTool.create(dial_endpoint=DIAL_ENDPOINT, mcp_url="http://localhost:8050/mcp", tool_name="execute_code"))
+        base_tools.extend(await self._get_mcp_tools(url="http://localhost:8051/mcp"))
+        return base_tools
 
     async def chat_completion(self, request: Request, response: Response) -> None:
         #TODO:
@@ -61,7 +72,11 @@ class GeneralPurposeAgentApplication(ChatCompletion):
         #       - deployment_name=DEPLOYMENT_NAME
         #       - request=request
         #       - response=response
-        raise NotImplementedError()
+        if not self.tools:
+            self.tools = await self._create_tools()
+        with response.create_single_choice() as choice:
+            agent = GeneralPurposeAgent(endpoint=DIAL_ENDPOINT, system_prompt=SYSTEM_PROMPT, tools=self.tools)
+            await agent.handle_request(choice=choice, deployment_name=DEPLOYMENT_NAME, request=request, response=response)
 
 #TODO:
 # 1. Create DIALApp
@@ -70,3 +85,10 @@ class GeneralPurposeAgentApplication(ChatCompletion):
 #       - deployment_name="general-purpose-agent"
 #       - impl=agent_app
 # 4. Run it with uvicorn: `uvicorn.run({CREATED_DIAL_APP}, port=5030, host="0.0.0.0")`
+app = DIALApp()
+agent_app = GeneralPurposeAgentApplication()
+app.add_chat_completion(deployment_name="general-purpose-agent", impl=agent_app)
+
+if __name__ == "__main__":
+    uvicorn.run(app, port=5030, host="0.0.0.0")
+
